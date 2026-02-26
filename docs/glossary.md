@@ -53,6 +53,25 @@ MockConnector simulates behavior for testing
 Your orchestrator calls a connector; connector calls the gateway API.
 Webhook handler must be idempotent. 
 Downstream actions: things your system triggers after success
+********************************************
+
+Webhooks deep dive:
+the gateway calling you informing about events.
+Normal API:you->Gatway
+Webhook: Gateway->You(Webhooks are reverse API call)
+Payment Flow With Webhook:
+Merchant → Orchestrator → Gateway
+                      |
+                      | (later)
+                      ↓
+                 Webhook Event
+                      ↓
+                 Orchestrator updates DB
+
+Webhooks can arrive late ,twice, arrive out of order, never arrive.They are push based. gatway tells you. eventually consistent. Truth may arrive later. Without webhooks you must poll gateway continuously.Webhook idempotency prevent duplicate event processing. 
+*Confirm Idempotency prevents you approaching gateway twice.
+*Webhook Idempotency prevents Gateway-> you twice.
+Your orchestrator must be idempotent in both directions.                  
 
 
 
