@@ -56,8 +56,9 @@ Downstream actions: things your system triggers after success
 ********************************************
 
 Webhooks deep dive:
+Webhooks are nothing but reverse API(HTTP).
 the gateway calling you informing about events.
-Normal API:you->Gatway
+Normal API:you->Gateway
 Webhook: Gateway->You(Webhooks are reverse API call)
 Payment Flow With Webhook:
 Merchant → Orchestrator → Gateway
@@ -71,8 +72,56 @@ Merchant → Orchestrator → Gateway
 Webhooks can arrive late ,twice, arrive out of order, never arrive.They are push based. gatway tells you. eventually consistent. Truth may arrive later. Without webhooks you must poll gateway continuously.Webhook idempotency prevent duplicate event processing. 
 *Confirm Idempotency prevents you approaching gateway twice.
 *Webhook Idempotency prevents Gateway-> you twice.
-Your orchestrator must be idempotent in both directions.                  
+Your orchestrator must be idempotent in both directions.
+So webhooks use API(HTTP), but the key difference is push vs pull:
+API response: you asked and go an immediately reply
+webhook: you didn't at that moment, you get notified later.                   
+**********************************************
+Orchestrator runs:
+state machine (created/processing/succeeded/failed)
+Idempotency checks
+Writes to Postgres
+Connector calls to gateways
+Webhook handlers (incoming + outgoing)
+Background jobs (worker) for retries
 
+Gateway runs(talks the banking infrastructure and sends webhooks to orchestrator/merchant):
+Payment processing
+Risk checks
+3DS / OTP flows
+Provider database
+Sends events
+*********************************************
+There are two main independent channels:
+Synchronous API-> immediate request response
+Asynchronous web events(event notification bar)->This comes later maybe.
+Gateway → Orchestrator   (provider webhook)
+Orchestrator → Merchant  (merchant webhook notification)
+
+************************************************
+SLA window: Service level Agreement:
+Here it’s a time bound you set, like:
+“processing must resolve within 15 minutes”
+“merchant webhook delivery retries for up to 24 hours”
+“webhook delivery attempts every 1m, 2m, 4m, 8m…”
+
+This is not legal SLA for your portfolio; it’s an engineering time budget.
+
+Why it matters:
+prevents infinite retries
+keeps system predictable
+makes operations manageable
+
+*******************************
+State handling is done inside your orchestrator in two places:
+1-Synchronous request handler(confirm endpoint)
+2-Asynchronous request handler(webhook endpoint + worker)
+*************************************
+Auditability : the system can answer exactly what happened to payments.
+payments+attempts+events=full history
+**********************************************
+Based on this invariant.md we must ask ourself : What must we store to make this true? 
+this mappings produces tables which is data-model.md
 
 
 
