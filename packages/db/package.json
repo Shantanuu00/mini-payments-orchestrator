@@ -1,20 +1,20 @@
 {
-  "name": "@pkg/core",
+  "name": "@pkg/db",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "node -e \"console.log('lint later')\"",
-    "test": "tsx --test src/payment.test.ts"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node -e \"console.log('no db tests yet')\""
   },
   "dependencies": {
-    "zod": "^3.23.8"
+    "pg": "^8.13.1"
   },
   "devDependencies": {
-    "tsx": "^4.19.2",
+    "@types/node": "^22.13.10",
     "typescript": "^5.8.2"
   },
   "exports": "./src/index.ts"
