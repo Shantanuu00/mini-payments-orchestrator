@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildApp } from "./index";
+import { buildApp } from "./index.js";
 
 test("health endpoint", async () => {
   const app = buildApp();

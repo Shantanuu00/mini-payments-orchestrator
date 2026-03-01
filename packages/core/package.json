@@ -11,9 +11,6 @@
     "lint": "node -e \"console.log('lint later')\"",
     "test": "tsx --test src/payment.test.ts"
   },
-  "dependencies": {
-    "zod": "^3.23.8"
-  },
   "devDependencies": {
     "@types/node": "^22.13.10",
     "tsx": "^4.19.2",
