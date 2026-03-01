@@ -1,5 +1,3 @@
--- packages/db/schema.sql
-
 -- Enums
 DO $$ BEGIN
   CREATE TYPE payment_status AS ENUM ('created','processing','succeeded','failed','manual_review');
@@ -33,7 +31,10 @@ CREATE TABLE IF NOT EXISTS payments (
   succeeded_attempt_id UUID NULL,
 
   failure_code TEXT NULL,
-  failure_message TEXT NULL
+  failure_message TEXT NULL,
+
+  last_confirm_idempotency_key TEXT NULL,
+  last_confirm_response JSONB NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_payments_merchant_created
@@ -42,13 +43,17 @@ CREATE INDEX IF NOT EXISTS idx_payments_merchant_created
 CREATE INDEX IF NOT EXISTS idx_payments_status_deadline
   ON payments (status, processing_deadline_at);
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_confirm_idempotency
+  ON payments (merchant_id, last_confirm_idempotency_key)
+  WHERE last_confirm_idempotency_key IS NOT NULL;
+
 -- Attempts (audit trail)
 CREATE TABLE IF NOT EXISTS payment_attempts (
   id UUID PRIMARY KEY,
   payment_id UUID NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
   merchant_id TEXT NOT NULL,
 
-  connector TEXT NOT NULL,              -- "mock", later "stripe", "razorpay"
+  connector TEXT NOT NULL,
   operation TEXT NOT NULL DEFAULT 'confirm',
 
   status attempt_status NOT NULL DEFAULT 'started',
@@ -59,7 +64,8 @@ CREATE TABLE IF NOT EXISTS payment_attempts (
   request_id TEXT NULL,
   idempotency_key TEXT NULL,
 
-  provider_payment_id TEXT NULL,        -- gateway's reference
+  provider_event_id TEXT NULL,
+  provider_payment_id TEXT NULL,
   error_code TEXT NULL,
   error_message TEXT NULL,
 
@@ -70,10 +76,10 @@ CREATE TABLE IF NOT EXISTS payment_attempts (
 CREATE INDEX IF NOT EXISTS idx_attempts_payment_created
   ON payment_attempts (payment_id, created_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_attempts_connector_provider
-  ON payment_attempts (connector, provider_payment_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_attempts_webhook_event
+  ON payment_attempts (connector, provider_event_id)
+  WHERE provider_event_id IS NOT NULL;
 
--- Safety helper: prevent two "succeeded" attempts for same payment (partial unique index)
 CREATE UNIQUE INDEX IF NOT EXISTS uq_one_success_attempt_per_payment
   ON payment_attempts (payment_id)
   WHERE status = 'succeeded';
