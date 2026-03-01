@@ -1,5 +1,5 @@
 {
-  "name": "@app/api",
+  "name": "@app/worker",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -9,17 +9,11 @@
     "start": "node dist/index.js",
     "lint": "node -e \"console.log('lint later')\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "NODE_ENV=test tsx --test src/index.test.ts src/invariants.test.ts"
+    "test": "node -e \"console.log('no worker tests yet')\""
   },
   "dependencies": {
-    "@fastify/cors": "^9.0.1",
-    "@fastify/swagger": "^8.15.0",
-    "@fastify/swagger-ui": "^4.2.0",
     "@pkg/core": "*",
-    "@pkg/db": "*",
-    "fastify": "^4.28.1",
-    "pg": "^8.13.1",
-    "zod": "^3.23.8"
+    "@pkg/db": "*"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

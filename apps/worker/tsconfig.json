@@ -2,8 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "src",
-    "declaration": true
+    "rootDir": "src"
   },
-  "include": ["src/index.ts", "src/payment.ts"]
+  "include": ["src"]
 }
