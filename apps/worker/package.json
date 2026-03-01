@@ -1,0 +1,22 @@
+{
+  "name": "@app/worker",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "lint": "node -e \"console.log('lint later')\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node -e \"console.log('no worker tests yet')\""
+  },
+  "dependencies": {
+    "@pkg/core": "*",
+    "@pkg/db": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.2"
+  }
+}
