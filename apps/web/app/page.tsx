@@ -22,12 +22,24 @@ type Attempt = {
   error_message: string | null;
 };
 
-type WebhookEvent = {
-  provider_event_id: string;
+type Delivery = {
+  id: string;
+  payment_id: string;
   event_type: string;
-  connector: string;
-  provider_payment_id: string;
-  received_at: string;
+  status: string;
+  attempt_count: number;
+  next_retry_at: string | null;
+  delivered_at: string | null;
+  last_error: string | null;
+  created_at: string;
+};
+
+type ScenarioResult = {
+  first: unknown;
+  second: unknown;
+  identical: boolean;
+  attemptsBefore: number;
+  attemptsAfter: number;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
@@ -51,65 +63,51 @@ export default function DashboardPage() {
 
   const [webhookConnector, setWebhookConnector] = useState("mock");
   const [providerPaymentId, setProviderPaymentId] = useState("");
-  const [webhookEventType, setWebhookEventType] = useState<"succeeded" | "failed">("succeeded");
   const [providerEventId, setProviderEventId] = useState(`evt_${crypto.randomUUID()}`);
+  const [webhookOutcome, setWebhookOutcome] = useState<"succeeded" | "failed">("succeeded");
 
   const [payment, setPayment] = useState<Payment | null>(null);
   const [attempts, setAttempts] = useState<Attempt[]>([]);
-  const [webhookEvents, setWebhookEvents] = useState<WebhookEvent[]>([]);
+  const [deliveries, setDeliveries] = useState<Delivery[]>([]);
 
-  const [isCreating, setIsCreating] = useState(false);
-  const [isConfirming, setIsConfirming] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isSimulatingWebhook, setIsSimulatingWebhook] = useState(false);
-
-  const [lastConfirmResponse, setLastConfirmResponse] = useState<unknown>(null);
-  const [lastWebhookResponse, setLastWebhookResponse] = useState<unknown>(null);
+  const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const canConfirm = Boolean(paymentId && merchantId && idempotencyKey);
-  const canSimulateWebhook = Boolean(webhookConnector && providerPaymentId && providerEventId);
+  const [duplicateConfirmResult, setDuplicateConfirmResult] = useState<ScenarioResult | null>(null);
+  const [lastWebhookSingleResponse, setLastWebhookSingleResponse] = useState<unknown>(null);
+  const [webhookDedupeResult, setWebhookDedupeResult] = useState<{ first: unknown; second: unknown } | null>(null);
 
   const statusLabel = useMemo(() => payment?.status ?? "created", [payment?.status]);
 
   async function safeJson(response: Response) {
     const payload = await response.json().catch(() => null);
     if (!response.ok) {
-      const message = payload?.error ? String(payload.error) : `HTTP ${response.status}`;
-      throw new Error(message);
+      throw new Error(payload?.error ? String(payload.error) : `HTTP ${response.status}`);
     }
     return payload;
   }
 
-  async function loadPayment() {
-    if (!paymentId) return;
-    setIsRefreshing(true);
-    setErrorMessage(null);
+  async function refreshPaymentAndDeliveries(currentPaymentId: string) {
+    const paymentResponse = await fetch(`${API_BASE}/payments/${currentPaymentId}`);
+    const paymentData = await safeJson(paymentResponse);
 
-    try {
-      const response = await fetch(`${API_BASE}/payments/${paymentId}`);
-      const data = await safeJson(response);
+    setPayment({
+      id: paymentData.payment.id,
+      merchantId: paymentData.payment.merchant_id,
+      amount: Number(paymentData.payment.amount),
+      currency: paymentData.payment.currency,
+      status: paymentData.payment.status,
+    });
+    setAttempts((paymentData.attempts ?? []) as Attempt[]);
 
-      const paymentData = data.payment;
-      setPayment({
-        id: paymentData.id,
-        merchantId: paymentData.merchant_id,
-        amount: Number(paymentData.amount),
-        currency: paymentData.currency,
-        status: paymentData.status,
-      });
-      setAttempts((data.attempts ?? []) as Attempt[]);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to fetch payment");
-    } finally {
-      setIsRefreshing(false);
-    }
+    const deliveriesResponse = await fetch(`${API_BASE}/deliveries?payment_id=${encodeURIComponent(currentPaymentId)}`);
+    const deliveriesData = await safeJson(deliveriesResponse);
+    setDeliveries((deliveriesData.deliveries ?? []) as Delivery[]);
   }
 
   async function createPayment() {
-    setIsCreating(true);
+    setLoadingAction("create");
     setErrorMessage(null);
-
     try {
       const response = await fetch(`${API_BASE}/payments`, {
         method: "POST",
@@ -117,328 +115,319 @@ export default function DashboardPage() {
         body: JSON.stringify({ merchantId, amount, currency: currency.toUpperCase() }),
       });
       const data = await safeJson(response);
-
-      setPayment(data as Payment);
-      setPaymentId((data as Payment).id);
+      const created = data as Payment;
+      setPayment(created);
+      setPaymentId(created.id);
       setAttempts([]);
-      setWebhookEvents([]);
-      setLastConfirmResponse(null);
-      setLastWebhookResponse(null);
+      setDeliveries([]);
+      setDuplicateConfirmResult(null);
+      setLastWebhookSingleResponse(null);
+      setWebhookDedupeResult(null);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Failed to create payment");
     } finally {
-      setIsCreating(false);
+      setLoadingAction(null);
     }
   }
 
-  async function confirmPayment(replay = false) {
-    if (!canConfirm) return;
-    setIsConfirming(true);
+  async function refreshAll() {
+    if (!paymentId) return;
+    setLoadingAction("refresh");
     setErrorMessage(null);
-
     try {
-      const response = await fetch(`${API_BASE}/payments/${paymentId}/confirm`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          merchantId,
-          connector,
-          idempotencyKey,
-        }),
-      });
-      const data = await safeJson(response);
-      setLastConfirmResponse({ replay, ...data });
-      await loadPayment();
+      await refreshPaymentAndDeliveries(paymentId);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to confirm payment");
+      setErrorMessage(error instanceof Error ? error.message : "Failed to refresh payment");
     } finally {
-      setIsConfirming(false);
+      setLoadingAction(null);
     }
   }
 
-  async function simulateWebhook() {
-    if (!canSimulateWebhook) return;
-    setIsSimulatingWebhook(true);
+  async function runDuplicateConfirmReplay() {
+    if (!paymentId) return;
+    setLoadingAction("duplicate-confirm");
     setErrorMessage(null);
-
     try {
-      const response = await fetch(`${API_BASE}/webhooks/${webhookConnector}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          providerEventId,
-          providerPaymentId,
-          eventType: `payment.${webhookEventType}`,
-          outcome: webhookEventType,
+      const attemptsBefore = attempts.length;
+
+      const body = { merchantId, connector, idempotencyKey };
+      const first = await safeJson(
+        await fetch(`${API_BASE}/payments/${paymentId}/confirm`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
         }),
+      );
+
+      const second = await safeJson(
+        await fetch(`${API_BASE}/payments/${paymentId}/confirm`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      );
+
+      await refreshPaymentAndDeliveries(paymentId);
+      const attemptsAfter = (await fetch(`${API_BASE}/payments/${paymentId}`).then(safeJson)).attempts.length as number;
+
+      setDuplicateConfirmResult({
+        first,
+        second,
+        identical: JSON.stringify(first) === JSON.stringify(second),
+        attemptsBefore,
+        attemptsAfter,
       });
-      const data = await safeJson(response);
-      setLastWebhookResponse(data);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Duplicate confirm demo failed");
+    } finally {
+      setLoadingAction(null);
+    }
+  }
 
-      setWebhookEvents((current) => [
-        {
-          connector: webhookConnector,
-          provider_event_id: providerEventId,
-          provider_payment_id: providerPaymentId,
-          event_type: `payment.${webhookEventType}`,
-          received_at: new Date().toISOString(),
-        },
-        ...current,
-      ]);
+  async function confirmWithFlakyConnector() {
+    if (!paymentId) return;
+    setLoadingAction("flaky-confirm");
+    setErrorMessage(null);
+    try {
+      const response = await safeJson(
+        await fetch(`${API_BASE}/payments/${paymentId}/confirm`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ merchantId, connector: "flaky", idempotencyKey: `flaky_${crypto.randomUUID()}` }),
+        }),
+      );
 
+      await refreshPaymentAndDeliveries(paymentId);
+
+      if (response?.status === "processing") {
+        setWebhookConnector("flaky");
+        const latest = attempts[0];
+        if (latest?.provider_payment_id) {
+          setProviderPaymentId(latest.provider_payment_id);
+        }
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Flaky confirm failed");
+    } finally {
+      setLoadingAction(null);
+    }
+  }
+
+  async function sendWebhookOnce() {
+    if (!paymentId || !providerPaymentId || !providerEventId) return;
+    setLoadingAction("webhook-once");
+    setErrorMessage(null);
+    try {
+      const payload = {
+        providerEventId,
+        providerPaymentId,
+        eventType: `payment.${webhookOutcome}`,
+        outcome: webhookOutcome,
+      };
+      const res = await safeJson(
+        await fetch(`${API_BASE}/webhooks/${webhookConnector}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      );
+      setLastWebhookSingleResponse(res);
+      await refreshPaymentAndDeliveries(paymentId);
       setProviderEventId(`evt_${crypto.randomUUID()}`);
-      await loadPayment();
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to simulate webhook");
+      setErrorMessage(error instanceof Error ? error.message : "Webhook demo failed");
     } finally {
-      setIsSimulatingWebhook(false);
+      setLoadingAction(null);
+    }
+  }
+
+  async function sendSameWebhookTwice() {
+    if (!paymentId || !providerPaymentId || !providerEventId) return;
+    setLoadingAction("webhook-dedupe");
+    setErrorMessage(null);
+    try {
+      const payload = {
+        providerEventId,
+        providerPaymentId,
+        eventType: `payment.${webhookOutcome}`,
+        outcome: webhookOutcome,
+      };
+      const first = await safeJson(
+        await fetch(`${API_BASE}/webhooks/${webhookConnector}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      );
+      const second = await safeJson(
+        await fetch(`${API_BASE}/webhooks/${webhookConnector}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      );
+      setWebhookDedupeResult({ first, second });
+      await refreshPaymentAndDeliveries(paymentId);
+      setProviderEventId(`evt_${crypto.randomUUID()}`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Webhook dedupe demo failed");
+    } finally {
+      setLoadingAction(null);
     }
   }
 
   return (
-    <main className="mx-auto min-h-screen max-w-6xl space-y-6 p-6 md:p-8">
+    <main className="mx-auto min-h-screen max-w-7xl space-y-6 p-6 md:p-8">
       <header className="space-y-1">
-        <h1 className="text-3xl font-bold tracking-tight text-zinc-50">Mini Payment Orchestrator</h1>
-        <p className="text-zinc-400">Recruiter demo: create, confirm, replay idempotency, and simulate provider webhooks.</p>
+        <h1 className="text-3xl font-bold tracking-tight text-zinc-50">Mini Payment Orchestrator Demo</h1>
+        <p className="text-zinc-400">Recruiter demo scenarios: idempotency replay, processing/webhook resolution, webhook dedupe, and delivery visibility.</p>
       </header>
 
-      {errorMessage ? (
-        <div className="rounded-lg border border-red-800 bg-red-950/40 px-4 py-3 text-sm text-red-300">{errorMessage}</div>
-      ) : null}
+      {errorMessage ? <div className="rounded-lg border border-red-700 bg-red-950/40 px-4 py-3 text-sm text-red-300">{errorMessage}</div> : null}
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card title="Create Payment" subtitle="Start a new payment intent">
+        <Card title="Create Payment">
           <div className="space-y-3">
-            <label className="block text-sm text-zinc-300">
-              Merchant ID
-              <input
-                className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-900 p-2"
-                value={merchantId}
-                onChange={(e) => setMerchantId(e.target.value)}
-              />
-            </label>
-            <label className="block text-sm text-zinc-300">
-              Amount (minor unit)
-              <input
-                className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-900 p-2"
-                type="number"
-                value={amount}
-                onChange={(e) => setAmount(Number(e.target.value))}
-              />
-            </label>
-            <label className="block text-sm text-zinc-300">
-              Currency
-              <input
-                className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-900 p-2"
-                value={currency}
-                onChange={(e) => setCurrency(e.target.value.toUpperCase())}
-              />
-            </label>
-            <button
-              className="rounded-md bg-white px-4 py-2 font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={createPayment}
-              disabled={isCreating}
-            >
-              {isCreating ? "Creating..." : "Create Payment"}
+            <input className="w-full rounded-md border border-zinc-700 bg-zinc-900 p-2" value={merchantId} onChange={(e) => setMerchantId(e.target.value)} placeholder="merchant id" />
+            <input className="w-full rounded-md border border-zinc-700 bg-zinc-900 p-2" type="number" value={amount} onChange={(e) => setAmount(Number(e.target.value))} placeholder="amount" />
+            <input className="w-full rounded-md border border-zinc-700 bg-zinc-900 p-2" value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase())} placeholder="currency" />
+            <button className="rounded-md bg-white px-4 py-2 font-medium text-black disabled:opacity-60" onClick={createPayment} disabled={loadingAction !== null}>
+              {loadingAction === "create" ? "Creating..." : "Create Payment"}
             </button>
           </div>
         </Card>
 
-        <Card title="Confirm Payment" subtitle="Demonstrate idempotent retries">
+        <Card title="Payment Context">
           <div className="space-y-3">
-            <label className="block text-sm text-zinc-300">
-              Payment ID
-              <input
-                className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-900 p-2"
-                value={paymentId}
-                onChange={(e) => setPaymentId(e.target.value)}
-                placeholder="uuid"
-              />
-            </label>
-            <label className="block text-sm text-zinc-300">
-              Connector
-              <select
-                className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-900 p-2"
-                value={connector}
-                onChange={(e) => setConnector(e.target.value)}
-              >
-                <option value="mock">mock</option>
-                <option value="flaky">flaky</option>
-              </select>
-            </label>
-            <label className="block text-sm text-zinc-300">
-              Idempotency Key
-              <input
-                className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-900 p-2"
-                value={idempotencyKey}
-                onChange={(e) => setIdempotencyKey(e.target.value)}
-              />
-            </label>
-            <div className="flex flex-wrap gap-2">
-              <button
-                className="rounded-md bg-emerald-500 px-4 py-2 font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={() => confirmPayment(false)}
-                disabled={!canConfirm || isConfirming}
-              >
-                {isConfirming ? "Confirming..." : "Confirm"}
-              </button>
-              <button
-                className="rounded-md bg-emerald-900 px-4 py-2 font-medium text-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={() => confirmPayment(true)}
-                disabled={!canConfirm || isConfirming}
-              >
-                Replay Confirm (same idempotency key)
-              </button>
-              <button
-                className="rounded-md bg-zinc-700 px-4 py-2 text-zinc-100 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={loadPayment}
-                disabled={!paymentId || isRefreshing}
-              >
-                {isRefreshing ? "Refreshing..." : "Refresh"}
-              </button>
-            </div>
-          </div>
-        </Card>
-      </div>
-
-      <Card title="Payment Details" subtitle="Canonical payment state + audit trails">
-        {payment ? (
-          <div className="space-y-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <span className="font-medium text-zinc-200">Payment {payment.id}</span>
-              <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase ${statusBadgeClass[statusLabel]}`}>
-                {statusLabel}
-              </span>
-            </div>
-            <div className="grid gap-2 text-sm text-zinc-300 md:grid-cols-2">
-              <p>Merchant: {payment.merchantId}</p>
-              <p>
-                Amount: {payment.amount} {payment.currency}
-              </p>
-            </div>
-          </div>
-        ) : (
-          <p className="text-sm text-zinc-400">No payment selected yet. Create a payment or paste a payment ID and click Refresh.</p>
-        )}
-      </Card>
-
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Card title="Attempts Timeline" subtitle="Latest attempt first">
-          {attempts.length === 0 ? (
-            <p className="text-sm text-zinc-400">No attempts yet.</p>
-          ) : (
-            <div className="space-y-2">
-              {attempts.map((attempt) => (
-                <article key={attempt.id} className="rounded-md border border-zinc-800 bg-zinc-950/70 p-3 text-sm">
-                  <p className="font-semibold text-zinc-100">{attempt.id}</p>
-                  <p className="text-zinc-300">
-                    {attempt.status.toUpperCase()} · connector: {attempt.connector}
-                  </p>
-                  <p className="text-zinc-400">provider_payment_id: {attempt.provider_payment_id ?? "—"}</p>
-                  <p className="text-zinc-500">created: {new Date(attempt.created_at).toLocaleString()}</p>
-                  <p className="text-zinc-500">updated: {new Date(attempt.updated_at).toLocaleString()}</p>
-                  {attempt.error_code ? (
-                    <p className="text-red-400">
-                      {attempt.error_code}: {attempt.error_message ?? "unknown"}
-                    </p>
-                  ) : null}
-                </article>
-              ))}
-            </div>
-          )}
-        </Card>
-
-        <Card title="Webhook Events Timeline" subtitle="Demo events (latest first)">
-          {webhookEvents.length === 0 ? (
-            <p className="text-sm text-zinc-400">No webhook events yet. Use Simulate Webhook to add events.</p>
-          ) : (
-            <div className="space-y-2">
-              {webhookEvents.map((event) => (
-                <article key={event.provider_event_id} className="rounded-md border border-zinc-800 bg-zinc-950/70 p-3 text-sm">
-                  <p className="font-semibold text-zinc-100">{event.provider_event_id}</p>
-                  <p className="text-zinc-300">{event.event_type}</p>
-                  <p className="text-zinc-400">connector: {event.connector}</p>
-                  <p className="text-zinc-400">provider_payment_id: {event.provider_payment_id}</p>
-                  <p className="text-zinc-500">received_at: {new Date(event.received_at).toLocaleString()}</p>
-                </article>
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
-
-      <Card title="Simulate Webhook" subtitle="For demo: trigger webhook handler and refresh state">
-        <div className="grid gap-3 md:grid-cols-2">
-          <label className="block text-sm text-zinc-300">
-            Connector
-            <select
-              className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-900 p-2"
-              value={webhookConnector}
-              onChange={(e) => setWebhookConnector(e.target.value)}
-            >
+            <input className="w-full rounded-md border border-zinc-700 bg-zinc-900 p-2" value={paymentId} onChange={(e) => setPaymentId(e.target.value)} placeholder="payment id" />
+            <select className="w-full rounded-md border border-zinc-700 bg-zinc-900 p-2" value={connector} onChange={(e) => setConnector(e.target.value)}>
               <option value="mock">mock</option>
               <option value="flaky">flaky</option>
             </select>
-          </label>
-          <label className="block text-sm text-zinc-300">
-            Event Type
-            <select
-              className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-900 p-2"
-              value={webhookEventType}
-              onChange={(e) => setWebhookEventType(e.target.value as "succeeded" | "failed")}
-            >
-              <option value="succeeded">succeeded</option>
-              <option value="failed">failed</option>
-            </select>
-          </label>
-          <label className="block text-sm text-zinc-300">
-            Provider Payment ID
-            <input
-              className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-900 p-2"
-              value={providerPaymentId}
-              onChange={(e) => setProviderPaymentId(e.target.value)}
-              placeholder="mock_<payment-id>"
-            />
-          </label>
-          <label className="block text-sm text-zinc-300">
-            Provider Event ID
-            <input
-              className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-900 p-2"
-              value={providerEventId}
-              onChange={(e) => setProviderEventId(e.target.value)}
-            />
-          </label>
-        </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            className="rounded-md bg-indigo-500 px-4 py-2 font-medium text-black disabled:cursor-not-allowed disabled:opacity-60"
-            onClick={simulateWebhook}
-            disabled={!canSimulateWebhook || isSimulatingWebhook}
-          >
-            {isSimulatingWebhook ? "Sending..." : "Simulate Webhook"}
-          </button>
-          <button
-            className="rounded-md bg-zinc-700 px-4 py-2 text-zinc-100"
-            onClick={loadPayment}
-            disabled={!paymentId || isRefreshing}
-          >
-            Refresh Payment
-          </button>
+            <input className="w-full rounded-md border border-zinc-700 bg-zinc-900 p-2" value={idempotencyKey} onChange={(e) => setIdempotencyKey(e.target.value)} placeholder="idempotency key" />
+            <button className="rounded-md bg-zinc-700 px-4 py-2" onClick={refreshAll} disabled={!paymentId || loadingAction !== null}>
+              {loadingAction === "refresh" ? "Refreshing..." : "Refresh Payment + Deliveries"}
+            </button>
+          </div>
+        </Card>
+      </div>
+
+      <Card title="Demo Scenarios" subtitle="Run deterministic demos and inspect reliability behavior.">
+        <div className="grid gap-6 lg:grid-cols-3">
+          <div className="space-y-3 rounded-lg border border-zinc-800 bg-zinc-950/60 p-4">
+            <h3 className="font-semibold">1) Duplicate Confirm Replay</h3>
+            <button className="rounded-md bg-emerald-500 px-3 py-2 text-black disabled:opacity-60" onClick={runDuplicateConfirmReplay} disabled={!paymentId || loadingAction !== null}>
+              {loadingAction === "duplicate-confirm" ? "Running..." : "Run Duplicate Confirm Replay"}
+            </button>
+            {duplicateConfirmResult ? (
+              <>
+                <p className={`text-sm ${duplicateConfirmResult.identical ? "text-emerald-300" : "text-red-300"}`}>
+                  Responses identical: {String(duplicateConfirmResult.identical)}
+                </p>
+                <p className={`text-sm ${duplicateConfirmResult.attemptsBefore === duplicateConfirmResult.attemptsAfter ? "text-emerald-300" : "text-red-300"}`}>
+                  Attempts unchanged: {duplicateConfirmResult.attemptsBefore} → {duplicateConfirmResult.attemptsAfter}
+                </p>
+                <div className="grid gap-2 md:grid-cols-2">
+                  <pre className="overflow-auto rounded bg-zinc-900 p-2 text-xs">{JSON.stringify(duplicateConfirmResult.first, null, 2)}</pre>
+                  <pre className="overflow-auto rounded bg-zinc-900 p-2 text-xs">{JSON.stringify(duplicateConfirmResult.second, null, 2)}</pre>
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-zinc-400">No run yet.</p>
+            )}
+          </div>
+
+          <div className="space-y-3 rounded-lg border border-zinc-800 bg-zinc-950/60 p-4">
+            <h3 className="font-semibold">2) Force Processing + Resolve via Webhook</h3>
+            <button className="rounded-md bg-amber-500 px-3 py-2 text-black disabled:opacity-60" onClick={confirmWithFlakyConnector} disabled={!paymentId || loadingAction !== null}>
+              {loadingAction === "flaky-confirm" ? "Confirming..." : "Confirm with Flaky Connector"}
+            </button>
+            <p className="text-sm text-zinc-300">Current status: <span className="font-semibold">{statusLabel}</span></p>
+            <div className="grid gap-2">
+              <select className="rounded-md border border-zinc-700 bg-zinc-900 p-2" value={webhookConnector} onChange={(e) => setWebhookConnector(e.target.value)}>
+                <option value="mock">mock</option>
+                <option value="flaky">flaky</option>
+              </select>
+              <input className="rounded-md border border-zinc-700 bg-zinc-900 p-2" value={providerPaymentId} onChange={(e) => setProviderPaymentId(e.target.value)} placeholder="provider_payment_id" />
+              <input className="rounded-md border border-zinc-700 bg-zinc-900 p-2" value={providerEventId} onChange={(e) => setProviderEventId(e.target.value)} placeholder="provider_event_id" />
+              <select className="rounded-md border border-zinc-700 bg-zinc-900 p-2" value={webhookOutcome} onChange={(e) => setWebhookOutcome(e.target.value as "succeeded" | "failed") }>
+                <option value="succeeded">succeeded</option>
+                <option value="failed">failed</option>
+              </select>
+              <button className="rounded-md bg-indigo-500 px-3 py-2 text-black disabled:opacity-60" onClick={sendWebhookOnce} disabled={!paymentId || !providerPaymentId || !providerEventId || loadingAction !== null}>
+                {loadingAction === "webhook-once" ? "Sending..." : "Send Webhook"}
+              </button>
+            </div>
+            <pre className="overflow-auto rounded bg-zinc-900 p-2 text-xs">{JSON.stringify(lastWebhookSingleResponse ?? { note: "No webhook sent yet" }, null, 2)}</pre>
+          </div>
+
+          <div className="space-y-3 rounded-lg border border-zinc-800 bg-zinc-950/60 p-4">
+            <h3 className="font-semibold">3) Webhook Dedupe Demo</h3>
+            <button className="rounded-md bg-fuchsia-500 px-3 py-2 text-black disabled:opacity-60" onClick={sendSameWebhookTwice} disabled={!paymentId || !providerPaymentId || !providerEventId || loadingAction !== null}>
+              {loadingAction === "webhook-dedupe" ? "Sending..." : "Send same webhook twice"}
+            </button>
+            <div className="grid gap-2 md:grid-cols-2">
+              <pre className="overflow-auto rounded bg-zinc-900 p-2 text-xs">{JSON.stringify(webhookDedupeResult?.first ?? { note: "first response pending" }, null, 2)}</pre>
+              <pre className="overflow-auto rounded bg-zinc-900 p-2 text-xs">{JSON.stringify(webhookDedupeResult?.second ?? { note: "second response pending" }, null, 2)}</pre>
+            </div>
+          </div>
         </div>
       </Card>
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card title="Last Confirm Response">
-          <pre className="overflow-auto rounded-md bg-zinc-950 p-3 text-xs text-zinc-200">
-            {JSON.stringify(lastConfirmResponse ?? { note: "No confirm calls yet" }, null, 2)}
-          </pre>
+        <Card title="Payment Details">
+          {payment ? (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <span className="font-semibold">{payment.id}</span>
+                <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase ${statusBadgeClass[statusLabel]}`}>{statusLabel}</span>
+              </div>
+              <p className="text-sm text-zinc-300">Amount: {payment.amount} {payment.currency}</p>
+              <p className="text-sm text-zinc-300">Merchant: {payment.merchantId}</p>
+            </div>
+          ) : (
+            <p className="text-sm text-zinc-400">No payment loaded yet.</p>
+          )}
         </Card>
-        <Card title="Last Webhook Response">
-          <pre className="overflow-auto rounded-md bg-zinc-950 p-3 text-xs text-zinc-200">
-            {JSON.stringify(lastWebhookResponse ?? { note: "No webhook calls yet" }, null, 2)}
-          </pre>
+
+        <Card title="Merchant Delivery Log">
+          {deliveries.length === 0 ? (
+            <p className="text-sm text-zinc-400">No delivery rows found for this payment.</p>
+          ) : (
+            <div className="space-y-2">
+              {deliveries.map((d) => (
+                <div key={d.id} className="rounded border border-zinc-800 bg-zinc-950/70 p-3 text-sm">
+                  <p className="font-semibold">{d.event_type}</p>
+                  <p>status: {d.status} · attempts: {d.attempt_count}</p>
+                  <p>created: {new Date(d.created_at).toLocaleString()}</p>
+                  <p>next_retry_at: {d.next_retry_at ? new Date(d.next_retry_at).toLocaleString() : "—"}</p>
+                  <p>delivered_at: {d.delivered_at ? new Date(d.delivered_at).toLocaleString() : "—"}</p>
+                  {d.last_error ? <p className="text-red-400">last_error: {d.last_error}</p> : null}
+                </div>
+              ))}
+            </div>
+          )}
         </Card>
       </div>
+
+      <Card title="Attempts Timeline (latest first)">
+        {attempts.length === 0 ? (
+          <p className="text-sm text-zinc-400">No attempts yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {attempts.map((attempt) => (
+              <article key={attempt.id} className="rounded-md border border-zinc-800 bg-zinc-950/70 p-3 text-sm">
+                <p className="font-semibold text-zinc-100">{attempt.id}</p>
+                <p>{attempt.status.toUpperCase()} · connector: {attempt.connector}</p>
+                <p>provider_payment_id: {attempt.provider_payment_id ?? "—"}</p>
+                <p>created: {new Date(attempt.created_at).toLocaleString()}</p>
+                <p>updated: {new Date(attempt.updated_at).toLocaleString()}</p>
+                {attempt.error_code ? <p className="text-red-400">{attempt.error_code}: {attempt.error_message ?? "unknown"}</p> : null}
+              </article>
+            ))}
+          </div>
+        )}
+      </Card>
     </main>
   );
 }

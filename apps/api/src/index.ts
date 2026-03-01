@@ -32,6 +32,7 @@ const webhookBodySchema = z.object({
 });
 
 const paymentIdParamsSchema = z.object({ id: z.string().uuid() });
+const deliveriesQuerySchema = z.object({ payment_id: z.string().uuid() });
 
 function toDomainPayment(row: PaymentRow): Payment {
   return {
@@ -307,6 +308,21 @@ export function buildApp() {
       request.log.error({ request_id: request.id, err: error }, "confirm_failed");
       return reply.code(500).send({ error: "INTERNAL_ERROR" });
     }
+  });
+
+
+  app.get("/deliveries", async (request, reply) => {
+    const parsed = deliveriesQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "INVALID_REQUEST", details: parsed.error.flatten() });
+    }
+
+    const result = await pool.query(
+      `SELECT * FROM merchant_webhook_deliveries WHERE payment_id = $1 ORDER BY created_at DESC`,
+      [parsed.data.payment_id],
+    );
+
+    return reply.send({ deliveries: result.rows });
   });
 
   app.post("/webhooks/:connector", async (request, reply) => {
