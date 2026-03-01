@@ -5,152 +5,143 @@ export type PaymentStatus =
   | "failed"
   | "manual_review";
 
-export type AttemptStatus = "started" | "succeeded" | "failed" | "unknown";
-
 export type Payment = {
   id: string;
   merchantId: string;
-  amount: number;   // smallest unit
-  currency: string; // "INR"
+  amount: number;
+  currency: string;
   status: PaymentStatus;
-  succeededAttemptId?: string | null;
   latestAttemptId?: string | null;
+  succeededAttemptId?: string | null;
   failureCode?: string | null;
   failureMessage?: string | null;
 };
 
-export type TransitionResult =
-  | { ok: true; next: Payment; reason: string }
-  | { ok: false; error: string; reason: string };
-
-const isTerminal = (s: PaymentStatus) =>
-  s === "succeeded" || s === "failed" || s === "manual_review";
-
 export type TransitionEvent =
-  | { type: "confirm_requested" }
   | { type: "provider_sync_succeeded"; attemptId: string }
-  | { type: "provider_sync_failed_definite"; code: string; message: string; attemptId: string }
-  | { type: "provider_sync_unknown"; attemptId: string } // timeout/5xx
+  | {
+      type: "provider_sync_failed_definite";
+      attemptId: string;
+      code: string;
+      message: string;
+    }
+  | { type: "provider_sync_unknown"; attemptId: string }
   | { type: "provider_webhook_succeeded"; attemptId: string }
-  | { type: "provider_webhook_failed"; code: string; message: string; attemptId: string }
+  | {
+      type: "provider_webhook_failed";
+      attemptId: string;
+      code: string;
+      message: string;
+    }
   | { type: "processing_deadline_exceeded" };
 
+export type TransitionResult =
+  | { ok: true; payment: Payment }
+  | { ok: false; error: "TERMINAL_STATE" | "INVALID_TRANSITION"; reason: string };
+
+const isTerminal = (status: PaymentStatus): boolean =>
+  status === "succeeded" || status === "failed" || status === "manual_review";
+
 export function applyPaymentTransition(
-  current: Payment,
-  event: TransitionEvent
+  payment: Payment,
+  event: TransitionEvent,
 ): TransitionResult {
-  // Safety invariant: terminal states do not regress
-  if (isTerminal(current.status)) {
+  if (isTerminal(payment.status)) {
     return {
       ok: false,
       error: "TERMINAL_STATE",
-      reason: `Cannot apply ${event.type} when payment is terminal (${current.status}).`,
+      reason: `Cannot transition from terminal state ${payment.status}.`,
     };
   }
 
-  switch (current.status) {
-    case "created": {
-      switch (event.type) {
-        case "provider_sync_succeeded":
-          return {
-            ok: true,
-            reason: "Sync success finalizes payment.",
-            next: {
-              ...current,
-              status: "succeeded",
-              succeededAttemptId: event.attemptId,
-              latestAttemptId: event.attemptId,
-              failureCode: null,
-              failureMessage: null,
-            },
-          };
-
-        case "provider_sync_failed_definite":
-          return {
-            ok: true,
-            reason: "Sync definite failure finalizes payment.",
-            next: {
-              ...current,
-              status: "failed",
-              latestAttemptId: event.attemptId,
-              failureCode: event.code,
-              failureMessage: event.message,
-            },
-          };
-
-        case "provider_sync_unknown":
-          return {
-            ok: true,
-            reason: "Unknown outcome moves payment to processing.",
-            next: {
-              ...current,
-              status: "processing",
-              latestAttemptId: event.attemptId,
-            },
-          };
-
-        // confirm_requested is an API-level event; state change occurs based on provider result.
-        case "confirm_requested":
-          return { ok: true, reason: "No-op. Await provider result.", next: current };
-
-        default:
-          return {
-            ok: false,
-            error: "INVALID_TRANSITION",
-            reason: `Event ${event.type} not allowed from created.`,
-          };
-      }
+  if (payment.status === "created") {
+    switch (event.type) {
+      case "provider_sync_succeeded":
+        return {
+          ok: true,
+          payment: {
+            ...payment,
+            status: "succeeded",
+            latestAttemptId: event.attemptId,
+            succeededAttemptId: event.attemptId,
+            failureCode: null,
+            failureMessage: null,
+          },
+        };
+      case "provider_sync_failed_definite":
+        return {
+          ok: true,
+          payment: {
+            ...payment,
+            status: "failed",
+            latestAttemptId: event.attemptId,
+            failureCode: event.code,
+            failureMessage: event.message,
+          },
+        };
+      case "provider_sync_unknown":
+        return {
+          ok: true,
+          payment: {
+            ...payment,
+            status: "processing",
+            latestAttemptId: event.attemptId,
+          },
+        };
+      default:
+        return {
+          ok: false,
+          error: "INVALID_TRANSITION",
+          reason: `Event ${event.type} is not allowed from created.`,
+        };
     }
-
-    case "processing": {
-      switch (event.type) {
-        case "provider_webhook_succeeded":
-          return {
-            ok: true,
-            reason: "Webhook success finalizes payment.",
-            next: {
-              ...current,
-              status: "succeeded",
-              succeededAttemptId: event.attemptId,
-              latestAttemptId: event.attemptId,
-              failureCode: null,
-              failureMessage: null,
-            },
-          };
-
-        case "provider_webhook_failed":
-          return {
-            ok: true,
-            reason: "Webhook failure finalizes payment.",
-            next: {
-              ...current,
-              status: "failed",
-              latestAttemptId: event.attemptId,
-              failureCode: event.code,
-              failureMessage: event.message,
-            },
-          };
-
-        case "processing_deadline_exceeded":
-          return {
-            ok: true,
-            reason: "SLA exceeded; escalate for review.",
-            next: {
-              ...current,
-              status: "manual_review",
-            },
-          };
-
-        default:
-          return {
-            ok: false,
-            error: "INVALID_TRANSITION",
-            reason: `Event ${event.type} not allowed from processing.`,
-          };
-      }
-    }
-
-    default:
-      return { ok: false, error: "UNKNOWN_STATE", reason: "Unhandled state." };
   }
+
+  if (payment.status === "processing") {
+    switch (event.type) {
+      case "provider_webhook_succeeded":
+        return {
+          ok: true,
+          payment: {
+            ...payment,
+            status: "succeeded",
+            latestAttemptId: event.attemptId,
+            succeededAttemptId: event.attemptId,
+            failureCode: null,
+            failureMessage: null,
+          },
+        };
+      case "provider_webhook_failed":
+        return {
+          ok: true,
+          payment: {
+            ...payment,
+            status: "failed",
+            latestAttemptId: event.attemptId,
+            failureCode: event.code,
+            failureMessage: event.message,
+          },
+        };
+      case "processing_deadline_exceeded":
+        return {
+          ok: true,
+          payment: {
+            ...payment,
+            status: "manual_review",
+          },
+        };
+      default:
+        return {
+          ok: false,
+          error: "INVALID_TRANSITION",
+          reason: `Event ${event.type} is not allowed from processing.`,
+        };
+    }
+  }
+
+  return {
+    ok: false,
+    error: "INVALID_TRANSITION",
+    reason: `Unknown current status ${payment.status}.`,
+  };
 }

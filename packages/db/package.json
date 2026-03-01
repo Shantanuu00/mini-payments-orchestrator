@@ -2,20 +2,10 @@
   "name": "@pkg/db",
   "private": true,
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "lint": "node -e \"console.log('lint later')\"",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node -e \"console.log('no db tests yet')\""
+    "db:apply": "node src/applySchema.js"
   },
   "dependencies": {
-    "pg": "^8.13.1"
-  },
-  "devDependencies": {
-    "@types/node": "^22.13.10",
-    "typescript": "^5.8.2"
-  },
-  "exports": "./src/index.ts"
+    "pg": "^8.11.5"
+  }
 }
