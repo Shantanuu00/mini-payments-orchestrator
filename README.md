@@ -1,127 +1,163 @@
-# Mini Payment Orchestrator
+# Mini Payment Orchestrator (Hyperswitch-inspired)
 
-A small monorepo payment orchestration demo inspired by Hyperswitch.
+A production-grade backend engineering project inspired by Hyperswitch, built as a focused monorepo to demonstrate reliable payment orchestration patterns.
 
-## Architecture Overview
+## Overview
 
-This repository is organized as a monorepo with app and package boundaries:
+This project models a modern payment orchestration platform with:
 
-- `apps/api` (Fastify + TypeScript)
-  - Exposes payment APIs and OpenAPI docs at `/docs`.
-  - Handles payment create/confirm/fetch and provider webhook ingestion.
-- `apps/worker` (Node.js + TypeScript)
-  - Periodically resolves expired `processing` payments to `manual_review`.
-  - Handles merchant webhook delivery retries with backoff.
-- `apps/web` (Next.js App Router)
-  - Demo dashboard for creating/confirming payments and simulating webhooks.
-  - Reads API origin from `NEXT_PUBLIC_API_BASE_URL`.
-- `packages/core`
-  - Payment domain/state transition logic (`applyPaymentTransition`) and shared schemas.
-- `packages/db`
-  - PostgreSQL schema and DB helpers.
+- **Unified payment API** for creating, confirming, and tracking payments.
+- **Multiple gateway orchestration** through connector-based confirmation and webhook handling.
+- **Idempotent confirms** to prevent duplicate charge attempts during retries.
+- **Webhook reconciliation** for at-least-once provider events.
+- **Processing deadlines** to avoid payments being stuck in indeterminate states.
+- **Merchant webhook retries** with backoff for resilient outbound notifications.
 
-## Environment Variables
+It is designed as a practical, engineering-focused system demonstrating production reliability concerns in payments.
 
-### API (`apps/api`)
+## Architecture
 
-- `DATABASE_URL` - PostgreSQL connection string (read by DB layer used by API).
-- `PORT` - API listen port (default: `8080`).
+### Components
 
-### Worker (`apps/worker`)
+- `apps/api` — Fastify Router API
+  - Merchant-facing payment APIs
+  - Connector confirm path + provider webhook ingestion
+  - Idempotency and reconciliation behavior
+- `apps/web` — Next.js dashboard
+  - Demo UI for payment lifecycle and reliability scenarios
+- `apps/worker` — background reliability engine
+  - Processing deadline sweeps
+  - Merchant delivery retry loop
+- `packages/core` — state machine + invariants
+  - Payment transitions and safety rules
+- `packages/db` — schema + constraints
+  - Postgres tables, indexes, and integrity constraints
 
-- `DATABASE_URL` - PostgreSQL connection string.
-- `MERCHANT_WEBHOOK_URL` - demo destination URL for outbound merchant webhook deliveries.
+**Postgres is the source of truth** for canonical payment state, attempt history, idempotency keys, provider webhook events, and merchant delivery logs.
 
-### Web (`apps/web`)
+### Diagram
 
-- `NEXT_PUBLIC_API_BASE_URL` - public base URL for API requests from the browser.
+```text
+Merchant → API → DB
+                 ↓
+             Worker
+                 ↓
+           Merchant Webhook
+```
 
-## Local Run
+## Key Engineering Features
 
-### 1) Install dependencies
+### Idempotency
+
+- Confirm idempotency keys per merchant request.
+- Request hash validation to reject key reuse with different payloads.
+- Response replay for safe retry semantics.
+
+### State Machine Safety
+
+- Terminal states (`succeeded`, `failed`, `manual_review`) do not regress.
+- Controlled transitions through `applyPaymentTransition`.
+
+### Reliability
+
+- Processing deadline enforcement.
+- Worker escalation from `processing` to `manual_review` when SLA expires.
+
+### Webhooks
+
+- Provider webhook dedupe on `(connector, provider_event_id)`.
+- Merchant webhook retries with delivery state tracking.
+- Exponential backoff scheduling for transient failures.
+
+### Auditability
+
+- Full attempt timeline per payment.
+- Provider reference persistence (`provider_payment_id`, event IDs).
+- Merchant delivery logs with attempts and errors.
+
+## Demo Scenarios
+
+Use the dashboard to demonstrate:
+
+1. **Duplicate Confirm Replay**
+   - Same idempotency key, repeated confirm, same response, no extra attempt.
+2. **Webhook Dedupe**
+   - Same provider event sent twice, second call treated as dedupe/no-op.
+3. **Processing → Manual Review**
+   - Worker escalates expired processing payments.
+4. **Merchant Delivery Retries**
+   - Outbound delivery retries with increasing backoff and terminal failure state.
+
+## API Endpoints
+
+- `POST /payments`
+- `POST /payments/{id}/confirm`
+- `GET /payments/{id}`
+- `POST /webhooks/{connector}`
+- `GET /deliveries?payment_id=`
+
+## Running Locally
+
+1. Install dependencies:
 
 ```bash
 npm install
 ```
 
-### 2) Start Postgres
-
-You can run Postgres with your preferred setup (Docker/local/cloud). Example `DATABASE_URL`:
+2. Set database URL:
 
 ```bash
 export DATABASE_URL='postgres://postgres:postgres@localhost:5432/mini_payments'
 ```
 
-### 3) Apply schema
-
-```bash
-npm run db:apply -w packages/db
-```
-
-### 4) Run services
-
-API:
+3. Run services:
 
 ```bash
 npm run dev:api
-```
-
-Worker:
-
-```bash
-export MERCHANT_WEBHOOK_URL='https://webhook.site/your-id'
+npm run dev:web
 npm run worker:dev
 ```
 
-Web:
+(Optionally apply schema first with `npm run db:apply -w packages/db`.)
 
-```bash
-export NEXT_PUBLIC_API_BASE_URL='http://localhost:8080'
-npm run dev:web
-```
+## Tests
 
-## Cloud Deployment (Neon + Render + Vercel)
-
-### 1) Neon (Postgres)
-
-1. Create a Neon project and database.
-2. Copy the Neon connection string as `DATABASE_URL`.
-3. Run schema apply once:
-
-```bash
-DATABASE_URL='<neon-url>' npm run db:apply -w packages/db
-```
-
-### 2) Render (API + Worker)
-
-Create two Render services from this repo:
-
-- **API service** (Node web service)
-  - Build command: `npm install && npm run build -w apps/api`
-  - Start command: `npm run start -w apps/api`
-  - Env vars:
-    - `DATABASE_URL=<neon-url>`
-    - `PORT=10000` (or Render-provided port)
-
-- **Worker service** (Node background worker)
-  - Build command: `npm install && npm run build -w apps/worker`
-  - Start command: `npm run start -w apps/worker`
-  - Env vars:
-    - `DATABASE_URL=<neon-url>`
-    - `MERCHANT_WEBHOOK_URL=<your-merchant-endpoint-or-webhook.site-url>`
-
-### 3) Vercel (Web)
-
-1. Import repo in Vercel.
-2. Set project root to `apps/web` (or use monorepo settings).
-3. Add env var:
-   - `NEXT_PUBLIC_API_BASE_URL=https://<your-render-api-domain>`
-4. Deploy.
-
-## Useful Commands
+Run all workspace tests:
 
 ```bash
 npm run test --workspaces
-npm run typecheck --workspaces
-npm run build --workspaces
 ```
+
+The suite includes invariant-focused tests (API + DB-backed paths) for idempotency replay, webhook dedupe behavior, terminal non-regression, and DB uniqueness guarantees.
+
+## Deployment
+
+Suggested cloud setup:
+
+- **Neon** for Postgres
+- **Render** for API + Worker services
+- **Vercel** for Web dashboard
+
+Use environment wiring:
+
+- API: `DATABASE_URL`, `PORT`
+- Worker: `DATABASE_URL`, `MERCHANT_WEBHOOK_URL`
+- Web: `NEXT_PUBLIC_API_BASE_URL`
+
+## Resume Value
+
+This project demonstrates practical backend engineering skills in:
+
+- payment systems reliability
+- distributed idempotency design
+- webhook/event-driven reconciliation
+- state machine modeling and invariants
+- background job retry orchestration
+- SQL schema design with safety constraints
+- full-stack observability and demoability
+
+## Screenshots
+
+- Dashboard _(placeholder)_
+- Payment Timeline _(placeholder)_
+- Delivery Log _(placeholder)_
