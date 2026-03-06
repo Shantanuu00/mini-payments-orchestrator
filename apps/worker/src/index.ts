@@ -7,6 +7,12 @@ const DELIVERY_POLL_INTERVAL_MS = 10_000;
 const MAX_DELIVERY_ATTEMPTS = 8;
 const DELIVERY_BACKOFF_MS = [5_000, 15_000, 45_000, 120_000, 300_000];
 
+const workerMetrics = {
+  delivery_retry_scheduled_total: 0,
+  delivery_dead_letter_total: 0,
+  delivery_success_total: 0,
+};
+
 type MerchantDeliveryStatus = "pending" | "delivering" | "delivered" | "failed";
 
 type MerchantWebhookDeliveryRow = {
@@ -243,6 +249,7 @@ async function deliverWebhook(delivery: MerchantWebhookDeliveryRow): Promise<voi
         [attemptCount, delivery.id],
       );
 
+      workerMetrics.delivery_success_total += 1;
       log("info", "merchant_webhook_delivered", {
         delivery_id: delivery.id,
         payment_id: delivery.payment_id,
@@ -268,6 +275,7 @@ async function deliverWebhook(delivery: MerchantWebhookDeliveryRow): Promise<voi
         [attemptCount, errorMessage, delivery.id],
       );
 
+      workerMetrics.delivery_dead_letter_total += 1;
       log("error", "merchant_webhook_dead_lettered", {
         delivery_id: delivery.id,
         payment_id: delivery.payment_id,
@@ -290,6 +298,7 @@ async function deliverWebhook(delivery: MerchantWebhookDeliveryRow): Promise<voi
       [attemptCount, nextRetryAt, errorMessage, delivery.id],
     );
 
+    workerMetrics.delivery_retry_scheduled_total += 1;
     log("error", "merchant_webhook_delivery_retry_scheduled", {
       delivery_id: delivery.id,
       payment_id: delivery.payment_id,
@@ -329,10 +338,8 @@ async function start(): Promise<void> {
     throw new Error("DATABASE_URL is required");
   }
 
-  const merchantWebhookUrl = process.env.MERCHANT_WEBHOOK_URL;
-  if (!merchantWebhookUrl) {
-    throw new Error("MERCHANT_WEBHOOK_URL is required");
-  }
+  const merchantWebhookUrl =
+    process.env.MERCHANT_WEBHOOK_URL ?? "http://localhost:8080/merchant-webhook/mock";
 
   log("info", "worker_started", {
     deadline_poll_interval_ms: DEADLINE_POLL_INTERVAL_MS,
@@ -361,10 +368,15 @@ async function start(): Promise<void> {
   const shutdown = async (signal: string) => {
     clearInterval(deadlineTimer);
     clearInterval(deliveryTimer);
+    clearInterval(metricsTimer);
     log("info", "worker_stopping", { signal });
     await closePool();
     process.exit(0);
   };
+
+  const metricsTimer = setInterval(() => {
+    log("info", "worker_metrics_snapshot", workerMetrics);
+  }, 60_000);
 
   process.on("SIGINT", () => {
     void shutdown("SIGINT");

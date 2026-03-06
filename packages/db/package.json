@@ -6,16 +6,19 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "lint": "node -e \"console.log('lint later')\"",
+    "lint": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node -e \"console.log('no db tests yet')\"",
-    "db:apply": "node ./apply-schema.js"
+    "test": "node --test test/schema.test.mjs",
+    "db:apply": "node ./apply-schema.js",
+    "db:migrate": "node ./migrate.js up",
+    "db:rollback": "node ./migrate.js down"
   },
   "dependencies": {
     "pg": "^8.13.1"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "@types/pg": "^8.11.10",
     "typescript": "^5.8.2"
   },
   "exports": "./src/index.ts"
