@@ -331,3 +331,40 @@ testDb("parallel duplicate webhook events still persist single event row", async
   );
   assert.equal(rowCount.rows[0].count, 1);
 });
+
+
+testDb("deliveries endpoint blocks cross-merchant access", async () => {
+  const merchantA = `mA_${randomUUID()}`;
+  const merchantB = `mB_${randomUUID()}`;
+
+  const created = await app.inject({
+    method: "POST",
+    url: "/payments",
+    headers: { "x-merchant-id": merchantA },
+    payload: { merchantId: merchantA, amount: 1200, currency: "USD" },
+  });
+  assert.equal(created.statusCode, 201);
+  const paymentId = (created.json() as { id: string }).id;
+
+  await pool.query(
+    `INSERT INTO merchant_webhook_deliveries (
+      id, merchant_id, payment_id, event_type, destination_url, payload_snapshot,
+      status, attempt_count, next_retry_at, created_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', 0, now(), now())`,
+    [randomUUID(), merchantA, paymentId, "payment.created", "http://localhost/mock", JSON.stringify({ paymentId })],
+  );
+
+  const forbidden = await app.inject({
+    method: "GET",
+    url: `/deliveries?payment_id=${paymentId}`,
+    headers: { "x-merchant-id": merchantB },
+  });
+  assert.equal(forbidden.statusCode, 403);
+
+  const allowed = await app.inject({
+    method: "GET",
+    url: `/deliveries?payment_id=${paymentId}`,
+    headers: { "x-merchant-id": merchantA },
+  });
+  assert.equal(allowed.statusCode, 200);
+});

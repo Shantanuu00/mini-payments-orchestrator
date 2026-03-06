@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createServer, type Server } from "node:http";
 import { applyPaymentTransition, type Payment } from "@pkg/core";
 import { closePool, pool, type PaymentRow } from "@pkg/db";
 
@@ -71,6 +72,39 @@ function isTerminalStatus(status: PaymentRow["status"]): boolean {
 function calculateNextRetryAt(attemptCount: number): Date {
   const backoff = DELIVERY_BACKOFF_MS[Math.min(attemptCount, DELIVERY_BACKOFF_MS.length - 1)];
   return new Date(Date.now() + backoff);
+}
+
+function renderWorkerMetrics(): string {
+  return [
+    `worker_delivery_retry_scheduled_total ${workerMetrics.delivery_retry_scheduled_total}`,
+    `worker_delivery_dead_letter_total ${workerMetrics.delivery_dead_letter_total}`,
+    `worker_delivery_success_total ${workerMetrics.delivery_success_total}`,
+  ].join("\n") + "\n";
+}
+
+function startWorkerMetricsServer(): Server {
+  const port = Number(process.env.WORKER_METRICS_PORT ?? 9464);
+  const server = createServer((req, res) => {
+    if (req.url === "/metrics") {
+      res.writeHead(200, { "content-type": "text/plain; version=0.0.4" });
+      res.end(renderWorkerMetrics());
+      return;
+    }
+
+    if (req.url === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "NOT_FOUND" }));
+  });
+
+  server.listen(port, "0.0.0.0", () => {
+    log("info", "worker_metrics_server_started", { port });
+  });
+  return server;
 }
 
 async function processExpiredPayment(row: PaymentRow): Promise<void> {
@@ -346,6 +380,8 @@ async function start(): Promise<void> {
     delivery_poll_interval_ms: DELIVERY_POLL_INTERVAL_MS,
   });
 
+  const metricsServer = startWorkerMetricsServer();
+
   await runDeadlineTick();
   await runDeliveryTick(merchantWebhookUrl);
 
@@ -370,6 +406,9 @@ async function start(): Promise<void> {
     clearInterval(deliveryTimer);
     clearInterval(metricsTimer);
     log("info", "worker_stopping", { signal });
+    await new Promise<void>((resolve, reject) => {
+      metricsServer.close((err) => (err ? reject(err) : resolve()));
+    });
     await closePool();
     process.exit(0);
   };

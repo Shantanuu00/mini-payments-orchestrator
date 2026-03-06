@@ -108,6 +108,14 @@ function getHeaderValue(headers: Record<string, unknown>, name: string): HeaderV
   return undefined;
 }
 
+function getRequiredMerchantHeader(headers: Record<string, unknown>): string | null {
+  const merchantHeader = getHeaderValue(headers, "x-merchant-id");
+  if (typeof merchantHeader !== "string") return null;
+  const normalized = merchantHeader.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+
 function hasAdminControlKey(headers: Record<string, unknown>): boolean {
   const expected = process.env.ADMIN_CONTROL_KEY;
   if (!expected) return false;
@@ -417,6 +425,11 @@ export function buildApp() {
       return reply.code(400).send({ error: "INVALID_REQUEST", details: parsed.error.flatten() });
     }
 
+    const headerMerchantId = getRequiredMerchantHeader(request.headers as Record<string, unknown>);
+    if (headerMerchantId && headerMerchantId !== parsed.data.merchantId) {
+      return reply.code(403).send({ error: "FORBIDDEN_MERCHANT_ACCESS" });
+    }
+
     const id = randomUUID();
     const { merchantId, amount, currency } = parsed.data;
 
@@ -435,7 +448,10 @@ export function buildApp() {
       return reply.code(400).send({ error: "INVALID_REQUEST", details: params.error.flatten() });
     }
 
-    const paymentResult = await pool.query<PaymentRow>("SELECT * FROM payments WHERE id = $1", [params.data.id]);
+    const headerMerchantId = getRequiredMerchantHeader(request.headers as Record<string, unknown>);
+    const paymentResult = headerMerchantId
+      ? await pool.query<PaymentRow>("SELECT * FROM payments WHERE id = $1 AND merchant_id = $2", [params.data.id, headerMerchantId])
+      : await pool.query<PaymentRow>("SELECT * FROM payments WHERE id = $1", [params.data.id]);
     if (!paymentResult.rowCount) {
       return reply.code(404).send({ error: "PAYMENT_NOT_FOUND" });
     }
@@ -461,6 +477,10 @@ export function buildApp() {
 
     const paymentId = params.data.id;
     const { merchantId, idempotencyKey, connector } = body.data;
+    const headerMerchantId = getRequiredMerchantHeader(request.headers as Record<string, unknown>);
+    if (headerMerchantId && headerMerchantId !== merchantId) {
+      return reply.code(403).send({ error: "FORBIDDEN_MERCHANT_ACCESS" });
+    }
     const requestHash = buildRequestHash({ paymentId, merchantId, idempotencyKey, connector });
 
     await pool.query("BEGIN");
@@ -633,6 +653,19 @@ export function buildApp() {
     const parsed = deliveriesQuerySchema.safeParse(request.query);
     if (!parsed.success) {
       return reply.code(400).send({ error: "INVALID_REQUEST", details: parsed.error.flatten() });
+    }
+
+    const headerMerchantId = getRequiredMerchantHeader(request.headers as Record<string, unknown>);
+    if (!headerMerchantId) {
+      return reply.code(403).send({ error: "FORBIDDEN_MERCHANT_ACCESS" });
+    }
+
+    const paymentAccess = await pool.query(
+      `SELECT id FROM payments WHERE id = $1 AND merchant_id = $2 LIMIT 1`,
+      [parsed.data.payment_id, headerMerchantId],
+    );
+    if (!paymentAccess.rowCount) {
+      return reply.code(403).send({ error: "FORBIDDEN_MERCHANT_ACCESS" });
     }
 
     const result = await pool.query(

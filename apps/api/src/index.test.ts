@@ -108,6 +108,33 @@ test("payments endpoint requires API key when MERCHANT_API_KEY is configured", a
   }
 });
 
+
+
+test("payments create rejects merchant header/body mismatch", async () => {
+  resetApiInMemoryStateForTests();
+  const app = buildApp();
+  const previousStrict = process.env.STRICT_MERCHANT_AUTH;
+  process.env.STRICT_MERCHANT_AUTH = "true";
+
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/payments",
+      headers: { "x-merchant-id": "m_header" },
+      payload: { merchantId: "m_body", amount: 100, currency: "USD" },
+    });
+    assert.equal(response.statusCode, 403);
+    assert.deepEqual(response.json(), { error: "FORBIDDEN_MERCHANT_ACCESS" });
+  } finally {
+    if (previousStrict === undefined) {
+      delete process.env.STRICT_MERCHANT_AUTH;
+    } else {
+      process.env.STRICT_MERCHANT_AUTH = previousStrict;
+    }
+    await app.close();
+  }
+});
+
 test("rate limiter returns 429 when request rate exceeds configured limit", async () => {
   resetApiInMemoryStateForTests();
   const app = buildApp();

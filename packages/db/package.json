@@ -11,7 +11,8 @@
     "test": "node --test test/schema.test.mjs",
     "db:apply": "node ./apply-schema.js",
     "db:migrate": "node ./migrate.js up",
-    "db:rollback": "node ./migrate.js down"
+    "db:rollback": "node ./migrate.js down",
+    "db:policy-check": "node ./scripts/verify-migration-policy.mjs"
   },
   "dependencies": {
     "pg": "^8.13.1"

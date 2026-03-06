@@ -7,3 +7,10 @@ test('worker config includes bounded retries and backoff schedule', async () => 
   assert.equal(source.includes('const MAX_DELIVERY_ATTEMPTS = 8;'), true);
   assert.equal(source.includes('const DELIVERY_BACKOFF_MS = [5_000, 15_000, 45_000, 120_000, 300_000];'), true);
 });
+
+
+test('worker exposes a local metrics endpoint for scraping', async () => {
+  const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  assert.equal(source.includes('req.url === "/metrics"'), true);
+  assert.equal(source.includes('WORKER_METRICS_PORT'), true);
+});

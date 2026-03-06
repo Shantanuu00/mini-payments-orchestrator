@@ -134,6 +134,8 @@ Use versioned migrations for setup:
 npm run db:migrate -w packages/db
 # non-production only rollback:
 ALLOW_DB_ROLLBACK=true npm run db:rollback -w packages/db
+# migration policy verification
+npm run db:policy-check -w packages/db
 ```
 
 ## Tests
@@ -157,7 +159,7 @@ Suggested cloud setup:
 Use environment wiring:
 
 - API: `DATABASE_URL`, `PORT`
-- Worker: `DATABASE_URL`, `MERCHANT_WEBHOOK_URL` (optional; defaults to API local mock receiver)
+- Worker: `DATABASE_URL`, `MERCHANT_WEBHOOK_URL` (optional; defaults to API local mock receiver), `WORKER_METRICS_PORT` (default `9464`)
 - Web: `NEXT_PUBLIC_API_BASE_URL`
 
 Security hardening env vars (recommended):
@@ -250,8 +252,10 @@ Before claiming full production-readiness, complete these hardening items:
 ## Observability Notes
 
 - API exposes Prometheus-style counters at `GET /metrics`.
+- Worker exposes Prometheus-style counters at `GET /metrics` on `WORKER_METRICS_PORT` (default `9464`).
 - API propagates `x-trace-id` (or generates one) in responses and logs for request tracing.
 - Alert thresholds and SLO targets are documented in `docs/operations/`.
+- Prometheus can scrape API and worker metrics via `infra/prometheus.yml` and `infra/docker_compose.yml`.
 
 Migration docs: `packages/db/migrations/001_initial.md`
 

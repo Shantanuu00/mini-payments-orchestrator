@@ -63,7 +63,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm install
       - name: Enforce forward-only migration policy docs
-        run: |
-          test -f packages/db/migrations/001_initial.md
-          grep -q "Not safe for production rollback" packages/db/migrations/001_initial.md
+        run: npm run db:policy-check -w packages/db
