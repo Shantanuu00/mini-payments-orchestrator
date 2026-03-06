@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createServer, type Server } from "node:http";
 import { applyPaymentTransition, type Payment } from "@pkg/core";
 import { closePool, pool, type PaymentRow } from "@pkg/db";
 
@@ -6,6 +7,12 @@ const DEADLINE_POLL_INTERVAL_MS = 30_000;
 const DELIVERY_POLL_INTERVAL_MS = 10_000;
 const MAX_DELIVERY_ATTEMPTS = 8;
 const DELIVERY_BACKOFF_MS = [5_000, 15_000, 45_000, 120_000, 300_000];
+
+const workerMetrics = {
+  delivery_retry_scheduled_total: 0,
+  delivery_dead_letter_total: 0,
+  delivery_success_total: 0,
+};
 
 type MerchantDeliveryStatus = "pending" | "delivering" | "delivered" | "failed";
 
@@ -65,6 +72,39 @@ function isTerminalStatus(status: PaymentRow["status"]): boolean {
 function calculateNextRetryAt(attemptCount: number): Date {
   const backoff = DELIVERY_BACKOFF_MS[Math.min(attemptCount, DELIVERY_BACKOFF_MS.length - 1)];
   return new Date(Date.now() + backoff);
+}
+
+function renderWorkerMetrics(): string {
+  return [
+    `worker_delivery_retry_scheduled_total ${workerMetrics.delivery_retry_scheduled_total}`,
+    `worker_delivery_dead_letter_total ${workerMetrics.delivery_dead_letter_total}`,
+    `worker_delivery_success_total ${workerMetrics.delivery_success_total}`,
+  ].join("\n") + "\n";
+}
+
+function startWorkerMetricsServer(): Server {
+  const port = Number(process.env.WORKER_METRICS_PORT ?? 9464);
+  const server = createServer((req, res) => {
+    if (req.url === "/metrics") {
+      res.writeHead(200, { "content-type": "text/plain; version=0.0.4" });
+      res.end(renderWorkerMetrics());
+      return;
+    }
+
+    if (req.url === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "NOT_FOUND" }));
+  });
+
+  server.listen(port, "0.0.0.0", () => {
+    log("info", "worker_metrics_server_started", { port });
+  });
+  return server;
 }
 
 async function processExpiredPayment(row: PaymentRow): Promise<void> {
@@ -243,6 +283,7 @@ async function deliverWebhook(delivery: MerchantWebhookDeliveryRow): Promise<voi
         [attemptCount, delivery.id],
       );
 
+      workerMetrics.delivery_success_total += 1;
       log("info", "merchant_webhook_delivered", {
         delivery_id: delivery.id,
         payment_id: delivery.payment_id,
@@ -268,6 +309,7 @@ async function deliverWebhook(delivery: MerchantWebhookDeliveryRow): Promise<voi
         [attemptCount, errorMessage, delivery.id],
       );
 
+      workerMetrics.delivery_dead_letter_total += 1;
       log("error", "merchant_webhook_dead_lettered", {
         delivery_id: delivery.id,
         payment_id: delivery.payment_id,
@@ -290,6 +332,7 @@ async function deliverWebhook(delivery: MerchantWebhookDeliveryRow): Promise<voi
       [attemptCount, nextRetryAt, errorMessage, delivery.id],
     );
 
+    workerMetrics.delivery_retry_scheduled_total += 1;
     log("error", "merchant_webhook_delivery_retry_scheduled", {
       delivery_id: delivery.id,
       payment_id: delivery.payment_id,
@@ -329,15 +372,15 @@ async function start(): Promise<void> {
     throw new Error("DATABASE_URL is required");
   }
 
-  const merchantWebhookUrl = process.env.MERCHANT_WEBHOOK_URL;
-  if (!merchantWebhookUrl) {
-    throw new Error("MERCHANT_WEBHOOK_URL is required");
-  }
+  const merchantWebhookUrl =
+    process.env.MERCHANT_WEBHOOK_URL ?? "http://localhost:8080/merchant-webhook/mock";
 
   log("info", "worker_started", {
     deadline_poll_interval_ms: DEADLINE_POLL_INTERVAL_MS,
     delivery_poll_interval_ms: DELIVERY_POLL_INTERVAL_MS,
   });
+
+  const metricsServer = startWorkerMetricsServer();
 
   await runDeadlineTick();
   await runDeliveryTick(merchantWebhookUrl);
@@ -361,10 +404,18 @@ async function start(): Promise<void> {
   const shutdown = async (signal: string) => {
     clearInterval(deadlineTimer);
     clearInterval(deliveryTimer);
+    clearInterval(metricsTimer);
     log("info", "worker_stopping", { signal });
+    await new Promise<void>((resolve, reject) => {
+      metricsServer.close((err) => (err ? reject(err) : resolve()));
+    });
     await closePool();
     process.exit(0);
   };
+
+  const metricsTimer = setInterval(() => {
+    log("info", "worker_metrics_snapshot", workerMetrics);
+  }, 60_000);
 
   process.on("SIGINT", () => {
     void shutdown("SIGINT");

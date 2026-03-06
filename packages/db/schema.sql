@@ -41,6 +41,41 @@ CREATE TABLE IF NOT EXISTS payments (
   idempotency_key_last TEXT NULL
 );
 
+
+-- 1b) merchant_api_keys (tenant authZ)
+CREATE TABLE IF NOT EXISTS merchant_api_keys (
+  id UUID PRIMARY KEY,
+  merchant_id TEXT NOT NULL,
+  key_hash TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('admin','operator','viewer')),
+  scopes TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
+  expires_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  revoked_at TIMESTAMPTZ NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_merchant_api_keys_hash
+  ON merchant_api_keys (merchant_id, key_hash)
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS idx_merchant_api_keys_status
+  ON merchant_api_keys (merchant_id, status);
+
+
+CREATE TABLE IF NOT EXISTS merchant_api_key_audit (
+  id UUID PRIMARY KEY,
+  merchant_id TEXT NOT NULL,
+  api_key_id UUID NULL REFERENCES merchant_api_keys(id) ON DELETE SET NULL,
+  actor TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('issued','revoked','auth_success','auth_failure')),
+  metadata JSONB NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_merchant_api_key_audit_merchant_created
+  ON merchant_api_key_audit (merchant_id, created_at DESC);
+
 -- 2) payment_attempts (audit trail)
 CREATE TABLE IF NOT EXISTS payment_attempts (
   id UUID PRIMARY KEY,
@@ -102,6 +137,19 @@ CREATE TABLE IF NOT EXISTS merchant_webhook_deliveries (
   last_error TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+
+-- 6) merchant_webhook_receipts (demo receiver audit)
+CREATE TABLE IF NOT EXISTS merchant_webhook_receipts (
+  id UUID PRIMARY KEY,
+  payment_id UUID NULL REFERENCES payments(id) ON DELETE SET NULL,
+  event_type TEXT NOT NULL,
+  payload_snapshot JSONB NOT NULL,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_merchant_webhook_receipts_payment_received
+  ON merchant_webhook_receipts (payment_id, received_at DESC);
 
 -- payment FK backrefs after attempts table exists
 DO $$ BEGIN

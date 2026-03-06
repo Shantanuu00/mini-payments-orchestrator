@@ -181,3 +181,190 @@ testDb("db constraint prevents two succeeded attempts for same payment", async (
     );
   });
 });
+
+
+testDb("merchant webhook mock receiver stores receipts and can be queried", async () => {
+  const merchantId = `m_${randomUUID()}`;
+  const { id: paymentId } = await createPayment(merchantId);
+
+  const post = await app.inject({
+    method: "POST",
+    url: "/merchant-webhook/mock",
+    payload: {
+      payment_id: paymentId,
+      event_type: "payment.succeeded",
+      payload: { payment_id: paymentId, status: "succeeded" },
+    },
+  });
+  assert.equal(post.statusCode, 202);
+
+  const receipts = await app.inject({
+    method: "GET",
+    url: `/merchant-webhook/receipts?payment_id=${paymentId}`,
+  });
+  assert.equal(receipts.statusCode, 200);
+
+  const json = receipts.json() as { receipts: Array<{ payment_id: string; event_type: string }> };
+  assert.equal(json.receipts.length, 1);
+  assert.equal(json.receipts[0].payment_id, paymentId);
+  assert.equal(json.receipts[0].event_type, "payment.succeeded");
+});
+
+
+testDb("concurrent confirms with same idempotency key remain single-attempt", async () => {
+  const merchantId = `m_${randomUUID()}`;
+  const { id: paymentId } = await createPayment(merchantId);
+
+  const idempotencyKey = `idem_${randomUUID()}`;
+  const payload = { merchantId, connector: "mock", idempotencyKey };
+
+  const [a, b] = await Promise.all([
+    app.inject({ method: "POST", url: `/payments/${paymentId}/confirm`, payload }),
+    app.inject({ method: "POST", url: `/payments/${paymentId}/confirm`, payload }),
+  ]);
+
+  assert.equal(a.statusCode, 200);
+  assert.equal(b.statusCode, 200);
+
+  const paymentDetails = await app.inject({ method: "GET", url: `/payments/${paymentId}` });
+  const paymentJson = paymentDetails.json() as { attempts: unknown[] };
+  assert.equal(paymentJson.attempts.length, 1);
+});
+
+
+testDb("admin can issue and revoke merchant api keys", async () => {
+  const merchantId = `m_${randomUUID()}`;
+  process.env.ADMIN_CONTROL_KEY = "admin_secret";
+
+  const issue = await app.inject({
+    method: "POST",
+    url: `/merchants/${merchantId}/api-keys`,
+    headers: { "x-admin-key": "admin_secret" },
+    payload: { role: "operator", scopes: ["payments:write", "payments:read"] },
+  });
+  assert.equal(issue.statusCode, 201);
+  const issued = issue.json() as { id: string; apiKey: string };
+  assert.ok(issued.apiKey);
+
+  const list = await app.inject({
+    method: "GET",
+    url: `/merchants/${merchantId}/api-keys`,
+    headers: { "x-admin-key": "admin_secret" },
+  });
+  assert.equal(list.statusCode, 200);
+
+  const revoke = await app.inject({
+    method: "POST",
+    url: `/merchants/${merchantId}/api-keys/${issued.id}/revoke`,
+    headers: { "x-admin-key": "admin_secret" },
+  });
+  assert.equal(revoke.statusCode, 200);
+
+  delete process.env.ADMIN_CONTROL_KEY;
+});
+
+testDb("tenant boundary blocks cross-merchant key usage", async () => {
+  process.env.ADMIN_CONTROL_KEY = "admin_secret";
+  process.env.STRICT_MERCHANT_AUTH = "true";
+
+  const merchantA = `mA_${randomUUID()}`;
+  const merchantB = `mB_${randomUUID()}`;
+
+  const issue = await app.inject({
+    method: "POST",
+    url: `/merchants/${merchantA}/api-keys`,
+    headers: { "x-admin-key": "admin_secret" },
+    payload: { role: "operator", scopes: ["payments:write"] },
+  });
+  assert.equal(issue.statusCode, 201);
+  const issued = issue.json() as { apiKey: string };
+
+  const forbidden = await app.inject({
+    method: "POST",
+    url: "/payments",
+    headers: { "x-api-key": issued.apiKey, "x-merchant-id": merchantB },
+    payload: { merchantId: merchantB, amount: 100, currency: "USD" },
+  });
+
+  assert.equal(forbidden.statusCode, 403);
+
+  delete process.env.ADMIN_CONTROL_KEY;
+  delete process.env.STRICT_MERCHANT_AUTH;
+});
+
+
+testDb("parallel duplicate webhook events still persist single event row", async () => {
+  const merchantId = `m_${randomUUID()}`;
+  const { id: paymentId } = await createPayment(merchantId);
+
+  const confirm = await app.inject({
+    method: "POST",
+    url: `/payments/${paymentId}/confirm`,
+    payload: { merchantId, connector: "mock", idempotencyKey: `idem_${randomUUID()}` },
+  });
+  assert.equal(confirm.statusCode, 200);
+
+  const details = await app.inject({ method: "GET", url: `/payments/${paymentId}` });
+  const detailsJson = details.json() as { attempts: Array<{ provider_payment_id: string | null }> };
+  const providerPaymentId = detailsJson.attempts[0]?.provider_payment_id;
+  assert.ok(providerPaymentId);
+
+  const providerEventId = `evt_${randomUUID()}`;
+  const payload = {
+    providerEventId,
+    providerPaymentId,
+    eventType: "payment.succeeded",
+    outcome: "succeeded",
+  };
+
+  const [a, b] = await Promise.all([
+    app.inject({ method: "POST", url: "/webhooks/mock", payload }),
+    app.inject({ method: "POST", url: "/webhooks/mock", payload }),
+  ]);
+
+  assert.equal(a.statusCode, 200);
+  assert.equal(b.statusCode, 200);
+
+  const rowCount = await pool.query(
+    "SELECT COUNT(*)::int AS count FROM provider_webhook_events WHERE connector = $1 AND provider_event_id = $2",
+    ["mock", providerEventId],
+  );
+  assert.equal(rowCount.rows[0].count, 1);
+});
+
+
+testDb("deliveries endpoint blocks cross-merchant access", async () => {
+  const merchantA = `mA_${randomUUID()}`;
+  const merchantB = `mB_${randomUUID()}`;
+
+  const created = await app.inject({
+    method: "POST",
+    url: "/payments",
+    headers: { "x-merchant-id": merchantA },
+    payload: { merchantId: merchantA, amount: 1200, currency: "USD" },
+  });
+  assert.equal(created.statusCode, 201);
+  const paymentId = (created.json() as { id: string }).id;
+
+  await pool.query(
+    `INSERT INTO merchant_webhook_deliveries (
+      id, merchant_id, payment_id, event_type, destination_url, payload_snapshot,
+      status, attempt_count, next_retry_at, created_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', 0, now(), now())`,
+    [randomUUID(), merchantA, paymentId, "payment.created", "http://localhost/mock", JSON.stringify({ paymentId })],
+  );
+
+  const forbidden = await app.inject({
+    method: "GET",
+    url: `/deliveries?payment_id=${paymentId}`,
+    headers: { "x-merchant-id": merchantB },
+  });
+  assert.equal(forbidden.statusCode, 403);
+
+  const allowed = await app.inject({
+    method: "GET",
+    url: `/deliveries?payment_id=${paymentId}`,
+    headers: { "x-merchant-id": merchantA },
+  });
+  assert.equal(allowed.statusCode, 200);
+});
